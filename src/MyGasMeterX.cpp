@@ -6,7 +6,7 @@
  * Created		: 03-Oct-2019
  * Tabsize		: 4
  * 
- * This Revision: $Id: MyGasMeterX.cpp 1321 2022-01-05 13:18:18Z  $
+ * This Revision: $Id: MyGasMeterX.cpp 1323 2022-01-07 10:19:03Z  $
  */
 
 /*
@@ -120,6 +120,8 @@
   const unsigned long BATTERY_REPORT_INTERVAL = 5 MINUTES;
   // Sleep time between reports (in milliseconds)
   const unsigned long MIN_REPORT_INTERVAL = 60 SECONDS;
+  // max time between count reports
+  const unsigned long MAX_REPORT_INTERVAL = 2 MINUTES;
   // report climate
   const unsigned long CLIMATE_REPORT_INTERVAL = 60 SECONDS;
   // time between light level reports
@@ -129,6 +131,8 @@
   const unsigned long BATTERY_REPORT_INTERVAL = 12 HOURS;
   // min time between count reports
   const unsigned long MIN_REPORT_INTERVAL = 5 MINUTES;
+  // max time between count reports
+  const unsigned long MAX_REPORT_INTERVAL = 30 MINUTES;
   // report climate
   const unsigned long CLIMATE_REPORT_INTERVAL = 5 MINUTES;
   // time between light level reports
@@ -159,16 +163,24 @@ MyMessage msgRelCount(SENSOR_ID_GAS,V_VAR2);		// clicks since last report  my/+/
 /*
 	annual consumption is ca 1'000 m3, or 1'000'000 liters
 	uint32_t good enough for 2000 years ...
+
+	max observed is 20 counts/5min. 
+	Let's plan for 10/min, or 50/5min ... uint8_t good enough for pulseCount
+	That's 600/h, so uint16_t good enough for countPerHour
 */
 
-volatile uint32_t pulseCount = 0;	///< counter for magnet pulses (clicks), updated in ISR
-uint32_t oldPulseCount = 0;			// used to detect changes
-uint32_t absPulseCount = 0;			///< cumulative pulse count
-bool absValid = false;				///< has initial value been received from gateway?
-uint32_t countPerHour = 0;			///< accumulates clicks for 1 hour
+typedef uint8_t relcnt_t;
+
+bool absValid = false;					///< true if initial value has been received from gateway
+
+volatile relcnt_t pulseCount = 0;		///< counter for magnet pulses (clicks), updated in ISR
+volatile uint32_t absPulseCount = 0;	///< cumulative pulse count
+
+relcnt_t oldPulseCount = 0;			///< used to detect changes
+uint32_t countPerHour = 0;				///< accumulates clicks for 1 hour
 uint32_t t_last_sent;
 
-uint16_t batteryVoltage = 3300;		// last measured battery voltage in mV
+uint16_t batteryVoltage = 3300;			// last measured battery voltage in mV
 
 AvrTimer2 timer2;
 
@@ -321,8 +333,10 @@ void myISR(void)
 
 	if (wasDown != magnet.isDown) {
 		wasDown = !wasDown;
-		if (wasDown) 
+		if (wasDown) {
 			pulseCount++;
+			if (absValid) absPulseCount++;
+		}
 	}
 }
 
@@ -413,7 +427,7 @@ void indication( const indication_t ind )
 
 void presentation()
 {
-	static char rev[] = "$Rev: 1321 $";
+	static char rev[] = "$Rev: 1323 $";
 	char* p = strchr(rev+6,'$');
 	if (p) *p=0;
 
@@ -516,7 +530,7 @@ void setup()
 	//           1...5...10........20........30........40        50        60  63
 	//           |   |    |    |    |    |    |    |    |    |    |    |    |   |
 	//                                                            23:59:01"
-	DEBUG_PRINT("$Id: MyGasMeterX.cpp 1321 2022-01-05 13:18:18Z  $ " __TIME__ "\r\n" ) ;
+	DEBUG_PRINT("$Id: MyGasMeterX.cpp 1323 2022-01-07 10:19:03Z  $ " __TIME__ "\r\n" ) ;
     DEBUG_PRINTF("Node: %d\r\n", MY_NODE_ID);
 	Serial.flush();
 }
@@ -527,38 +541,37 @@ void loop()
 {
 	static uint32_t t_battery_report=0uL;
 	static uint32_t t_hourly = 0;
-	uint32_t count;
+	relcnt_t _relCount;
+	uint32_t _absCount;
 
 	snooze(absValid);
 	
 	uint32_t t_now = timer2.get_millis();
 
-	bool sendNow = ((unsigned long)(t_now - t_last_sent) >= MIN_REPORT_INTERVAL );
+	bool maySendNow = ((uint32_t)(t_now - t_last_sent) >= MIN_REPORT_INTERVAL );
+	bool mustSendNow = ((uint32_t)(t_now - t_last_sent) >= MAX_REPORT_INTERVAL );
 
-	if (sendNow && (pulseCount != oldPulseCount)) {
-		if (absValid) {
-			// once we have received a valid start value for abs count, we accumulate
-			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-				count = pulseCount;
-				pulseCount = 0;
-			}
-			absPulseCount += count;
-			send(msgRelCount.set(count));
-			send(msgAbsCount.set(absPulseCount));
-		} else {
-			// only send relative counts
-			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-				count = pulseCount;
-			}
-			send(msgRelCount.set(count));
-            DEBUG_PRINT("Requesting AbsCount\r\n");
-			request(SENSOR_ID_GAS, V_VAR1);
+	if (maySendNow) {
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+			_relCount = pulseCount;
+			if (absValid) pulseCount=0;
+			_absCount = absPulseCount;
 		}
-		transportSleeping = false;
-		oldPulseCount = count;
-		countPerHour += count;
-		DEBUG_PRINTF("rel %ld, abs %ld\r\n", count, absPulseCount);
-		t_last_sent = t_now;
+		if (_relCount || mustSendNow || !absValid) {
+			if (absValid) {
+				send(msgRelCount.set(_relCount));
+				send(msgAbsCount.set(_absCount));
+			} else {
+				// only send relative counts
+				send(msgRelCount.set(_relCount));
+				DEBUG_PRINT("Requesting AbsCount\r\n");
+				request(SENSOR_ID_GAS, V_VAR1);
+			}
+			transportSleeping = false;
+			countPerHour += _relCount;
+			DEBUG_PRINTF("rel %ld, abs %ld\r\n", _relCount, _absCount);
+			t_last_sent = t_now;
+		}
 	}
 
 	// once per hour, calculate and report liters/h
