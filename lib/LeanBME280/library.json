@@ -1,0 +1,27 @@
+{
+    "name": "LeanBME280",
+    "version": "1.0.1",
+    "keywords": "arduino, library, bme280, i2c, temperature, pressure, humidity, sensor, low-power",
+    "description": "Compact BME280 temperature / pressure / humidity sensor library for Arduino.",
+    "homepage": "https://github.com/RequireIoT",
+    "license": "MPL 2.0",
+    "authors":
+    {
+        "name": "Bernd Waldmann",
+        "url": "https://github.com/RequireIoT",
+        "maintainer": true
+    },
+    "repository":
+    {
+        "type": "git",
+        "url": "https://github.com/RequireIoT",
+        "branch": "master"
+    },
+    "frameworks": "arduino",
+    "platforms":
+    [
+        "atmelavr",
+        "espressif8266",
+        "espressif32"
+    ]
+}
